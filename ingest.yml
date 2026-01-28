@@ -1,0 +1,103 @@
+name: Ingest and process datasets
+
+on:
+  workflow_dispatch:
+    inputs:
+      hyper_url:
+        description: 'Google Drive URL for Hyperliquid historical data'
+        required: true
+        default: ''
+      fear_url:
+        description: 'Google Drive URL for Fear & Greed index file'
+        required: true
+        default: ''
+      pii_option:
+        description: 'PII handling: anonymize_account_N | hash_account | no'
+        required: true
+        default: 'anonymize_account_N'
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install requirements
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+
+      - name: Download datasets from Drive
+        env:
+          HYPER_URL: ${{ github.event.inputs.hyper_url }}
+          FEAR_URL: ${{ github.event.inputs.fear_url }}
+        run: |
+          mkdir -p data/raw
+          python - <<'PY'
+import os
+from pathlib import Path
+import gdown
+h = os.environ['HYPER_URL']
+f = os.environ['FEAR_URL']
+gdown.download(h, 'data/raw/hyperliquid_history.csv', quiet=False)
+gdown.download(f, 'data/raw/fear_greed.csv', quiet=False)
+print('Downloaded files to data/raw')
+PY
+
+      - name: Run ingestion script
+        run: |
+          python src/data_ingest.py --local
+
+      - name: Anonymize accounts (if requested) and save processed files
+        env:
+          PII: ${{ github.event.inputs.pii_option }}
+        run: |
+          python - <<'PY'
+import os
+import pandas as pd
+from pathlib import Path
+pii = os.environ.get('PII','anonymize_account_N')
+RAW = Path('data/raw')
+OUT = Path('data/processed')
+OUT.mkdir(parents=True, exist_ok=True)
+hpath = RAW / 'hyperliquid_history.csv'
+if hpath.exists():
+    df = pd.read_csv(hpath)
+    if 'account' in df.columns and pii == 'anonymize_account_N':
+        uniq = df['account'].astype(str).unique()
+        mapping = {v: f"account_{i+1:04d}" for i,v in enumerate(uniq)}
+        df['account'] = df['account'].astype(str).map(mapping)
+    elif 'account' in df.columns and pii == 'hash_account':
+        import hashlib
+        df['account'] = df['account'].astype(str).apply(lambda x: hashlib.sha256(x.encode()).hexdigest())
+    df.to_parquet(OUT / 'hyperliquid_anonymized.parquet', index=False)
+fpath = RAW / 'fear_greed.csv'
+if fpath.exists():
+    fdf = pd.read_csv(fpath)
+    fdf.to_csv(OUT / 'fear_greed.csv', index=False)
+print('Wrote processed files to data/processed')
+PY
+
+      - name: Commit schema report and processed outputs
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add outputs/schema_report.md data/processed || true
+          if git diff --staged --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "Add schema report and anonymized processed files"
+            git push origin HEAD:main
+          fi
+
+      - name: Done
+        run: echo "Ingestion workflow completed. Check the repository for outputs/schema_report.md and data/processed/"
