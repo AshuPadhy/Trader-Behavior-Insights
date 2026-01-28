@@ -1,0 +1,13 @@
+pandas>=1.5
+numpy
+scikit-learn
+statsmodels
+seaborn
+matplotlib
+plotly
+jupyterlab
+pyarrow
+scipy
+shap
+gdown
+notebook
